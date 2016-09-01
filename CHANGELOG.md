@@ -8,6 +8,7 @@ FEATURES:
  * **New Resource:** `aws_default_route_table` [GH-8323]
  * **New Resource:** `librato_alert` [GH-8170]
  * **New Resource:** `librato_service` [GH-8170]
+ * **New Resource:** `cloudstack_affinity_group` [GH-8360]
  * The count of a resource can now be referenced for interpolations: `self.count` and `type.name.count` work [GH-8581]
 
 IMPROVEMENTS:
@@ -38,6 +39,7 @@ BUG FIXES:
  * provider/chef: Fix "invalid header" errors that could occur [GH-8382]
  * provider/github: Remove unsafe ptr dereferencing [GH-8512]
  * provider/mysql: Fix breakage in parsing MySQL version string [GH-8571]
+ * provider/template: `template_file` vars can be floating point [GH-8590]
  * provider/triton: Id trying to be used before being set [GH-8563]
 
 ## 0.7.2 (August 25, 2016)
