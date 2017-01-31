@@ -3,6 +3,7 @@ package terraform
 import (
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -34,7 +35,16 @@ type Graph struct {
 	// edges.
 	dependableMap map[string]dag.Vertex
 
+	// debugName is a name for reference in the debug output. This is usually
+	// to indicate what topmost builder was, and if this graph is a shadow or
+	// not.
+	debugName string
+
 	once sync.Once
+}
+
+func (g *Graph) DirectedGraph() dag.Grapher {
+	return &g.AcyclicGraph
 }
 
 // Add is the same as dag.Graph.Add.
@@ -71,6 +81,8 @@ func (g *Graph) Remove(v dag.Vertex) dag.Vertex {
 
 // Replace is the same as dag.Graph.Replace
 func (g *Graph) Replace(o, n dag.Vertex) bool {
+	g.once.Do(g.init)
+
 	// Go through and update our lookaside to point to the new vertex
 	for k, v := range g.dependableMap {
 		if v == o {
@@ -138,13 +150,6 @@ func (g *Graph) ConnectTo(v dag.Vertex, targets []string) []string {
 	return missing
 }
 
-// Dependable finds the vertices in the graph that have the given dependable
-// names and returns them.
-func (g *Graph) Dependable(n string) dag.Vertex {
-	// TODO: do we need this?
-	return nil
-}
-
 // Walk walks the graph with the given walker for callbacks. The graph
 // will be walked with full parallelism, so the walker should expect
 // to be called in concurrently.
@@ -166,20 +171,59 @@ func (g *Graph) walk(walker GraphWalker) error {
 	// Get the path for logs
 	path := strings.Join(ctx.Path(), ".")
 
+	// Determine if our walker is a panic wrapper
+	panicwrap, ok := walker.(GraphWalkerPanicwrapper)
+	if !ok {
+		panicwrap = nil // just to be sure
+	}
+
+	debugName := "walk-graph.json"
+	if g.debugName != "" {
+		debugName = g.debugName + "-" + debugName
+	}
+
+	debugBuf := dbug.NewFileWriter(debugName)
+	g.SetDebugWriter(debugBuf)
+	defer debugBuf.Close()
+
 	// Walk the graph.
 	var walkFn dag.WalkFunc
 	walkFn = func(v dag.Vertex) (rerr error) {
-		log.Printf("[DEBUG] vertex %s.%s: walking", path, dag.VertexName(v))
+		log.Printf("[DEBUG] vertex '%s.%s': walking", path, dag.VertexName(v))
+		g.DebugVisitInfo(v, g.debugName)
+
+		// If we have a panic wrap GraphWalker and a panic occurs, recover
+		// and call that. We ensure the return value is an error, however,
+		// so that future nodes are not called.
+		defer func() {
+			// If no panicwrap, do nothing
+			if panicwrap == nil {
+				return
+			}
+
+			// If no panic, do nothing
+			err := recover()
+			if err == nil {
+				return
+			}
+
+			// Modify the return value to show the error
+			rerr = fmt.Errorf("vertex %q captured panic: %s\n\n%s",
+				dag.VertexName(v), err, debug.Stack())
+
+			// Call the panic wrapper
+			panicwrap.Panic(v, err)
+		}()
 
 		walker.EnterVertex(v)
-		defer func() { walker.ExitVertex(v, rerr) }()
+		defer walker.ExitVertex(v, rerr)
 
 		// vertexCtx is the context that we use when evaluating. This
 		// is normally the context of our graph but can be overridden
 		// with a GraphNodeSubPath impl.
 		vertexCtx := ctx
 		if pn, ok := v.(GraphNodeSubPath); ok && len(pn.Path()) > 0 {
-			vertexCtx = walker.EnterPath(pn.Path())
+			vertexCtx = walker.EnterPath(normalizeModulePath(pn.Path()))
 			defer walker.ExitPath(pn.Path())
 		}
 
@@ -193,7 +237,10 @@ func (g *Graph) walk(walker GraphWalker) error {
 
 			// Allow the walker to change our tree if needed. Eval,
 			// then callback with the output.
-			log.Printf("[DEBUG] vertex %s.%s: evaluating", path, dag.VertexName(v))
+			log.Printf("[DEBUG] vertex '%s.%s': evaluating", path, dag.VertexName(v))
+
+			g.DebugVertexInfo(v, fmt.Sprintf("evaluating %T(%s)", v, path))
+
 			tree = walker.EnterEvalTree(v, tree)
 			output, err := Eval(tree, vertexCtx)
 			if rerr = walker.ExitEvalTree(v, output, err); rerr != nil {
@@ -204,29 +251,35 @@ func (g *Graph) walk(walker GraphWalker) error {
 		// If the node is dynamically expanded, then expand it
 		if ev, ok := v.(GraphNodeDynamicExpandable); ok {
 			log.Printf(
-				"[DEBUG] vertex %s.%s: expanding/walking dynamic subgraph",
+				"[DEBUG] vertex '%s.%s': expanding/walking dynamic subgraph",
 				path,
 				dag.VertexName(v))
+
+			g.DebugVertexInfo(v, fmt.Sprintf("expanding %T(%s)", v, path))
+
 			g, err := ev.DynamicExpand(vertexCtx)
 			if err != nil {
 				rerr = err
 				return
 			}
-
-			// Walk the subgraph
-			if rerr = g.walk(walker); rerr != nil {
-				return
+			if g != nil {
+				// Walk the subgraph
+				if rerr = g.walk(walker); rerr != nil {
+					return
+				}
 			}
 		}
 
 		// If the node has a subgraph, then walk the subgraph
 		if sn, ok := v.(GraphNodeSubgraph); ok {
 			log.Printf(
-				"[DEBUG] vertex %s.%s: walking subgraph",
+				"[DEBUG] vertex '%s.%s': walking subgraph",
 				path,
 				dag.VertexName(v))
 
-			if rerr = sn.Subgraph().walk(walker); rerr != nil {
+			g.DebugVertexInfo(v, fmt.Sprintf("subgraph: %T(%s)", v, path))
+
+			if rerr = sn.Subgraph().(*Graph).walk(walker); rerr != nil {
 				return
 			}
 		}

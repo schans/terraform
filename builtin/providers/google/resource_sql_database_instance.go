@@ -3,8 +3,8 @@ package google
 import (
 	"fmt"
 	"log"
+	"strings"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 
@@ -71,6 +71,7 @@ func resourceSqlDatabaseInstance() *schema.Resource {
 						"crash_safe_replication": &schema.Schema{
 							Type:     schema.TypeBool,
 							Optional: true,
+							Computed: true,
 						},
 						"database_flags": &schema.Schema{
 							Type:     schema.TypeList,
@@ -155,7 +156,7 @@ func resourceSqlDatabaseInstance() *schema.Resource {
 			"database_version": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
-				Default:  "MYSQL_5_5",
+				Default:  "MYSQL_5_6",
 				ForceNew: true,
 			},
 
@@ -487,7 +488,6 @@ func resourceSqlDatabaseInstanceCreate(d *schema.ResourceData, meta interface{})
 		instance.MasterInstanceName = v.(string)
 	}
 
-	log.Printf("[PAUL] INSERT: %s", spew.Sdump(project, instance))
 	op, err := config.clientSqlAdmin.Instances.Insert(project, instance).Do()
 	if err != nil {
 		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 409 {
@@ -566,7 +566,7 @@ func resourceSqlDatabaseInstanceRead(d *schema.ResourceData, meta interface{}) e
 				_backupConfiguration["enabled"] = settings.BackupConfiguration.Enabled
 			}
 
-			if vp, okp := _backupConfiguration["start_time"]; okp && vp != nil {
+			if vp, okp := _backupConfiguration["start_time"]; okp && len(vp.(string)) > 0 {
 				_backupConfiguration["start_time"] = settings.BackupConfiguration.StartTime
 			}
 
@@ -760,7 +760,7 @@ func resourceSqlDatabaseInstanceRead(d *schema.ResourceData, meta interface{}) e
 	d.Set("ip_address", _ipAddresses)
 
 	if v, ok := d.GetOk("master_instance_name"); ok && v != nil {
-		d.Set("master_instance_name", instance.MasterInstanceName)
+		d.Set("master_instance_name", strings.TrimPrefix(instance.MasterInstanceName, project+":"))
 	}
 
 	d.Set("self_link", instance.SelfLink)
@@ -996,7 +996,6 @@ func resourceSqlDatabaseInstanceUpdate(d *schema.ResourceData, meta interface{})
 
 	d.Partial(false)
 
-	log.Printf("[PAUL] UPDATE: %s", spew.Sdump(project, instance.Name, instance))
 	op, err := config.clientSqlAdmin.Instances.Update(project, instance.Name, instance).Do()
 	if err != nil {
 		return fmt.Errorf("Error, failed to update instance %s: %s", instance.Name, err)
