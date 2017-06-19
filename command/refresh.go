@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform/backend"
+	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/terraform"
 )
 
@@ -23,6 +24,8 @@ func (c *RefreshCommand) Run(args []string) int {
 	cmdFlags.IntVar(&c.Meta.parallelism, "parallelism", 0, "parallelism")
 	cmdFlags.StringVar(&c.Meta.stateOutPath, "state-out", "", "path")
 	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
+	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
+	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -41,8 +44,21 @@ func (c *RefreshCommand) Run(args []string) int {
 		return 1
 	}
 
+	// Check for user-supplied plugin path
+	if c.pluginPath, err = c.loadPluginPath(); err != nil {
+		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
+		return 1
+	}
+
+	var conf *config.Config
+	if mod != nil {
+		conf = mod.Config()
+	}
+
 	// Load the backend
-	b, err := c.Backend(&BackendOpts{ConfigPath: configPath})
+	b, err := c.Backend(&BackendOpts{
+		Config: conf,
+	})
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load backend: %s", err))
 		return 1
@@ -93,6 +109,10 @@ Options:
                       ".backup" extension. Set to "-" to disable backup.
 
   -input=true         Ask for input for variables if not directly set.
+
+  -lock=true          Lock the state file when locking is supported.
+
+  -lock-timeout=0s    Duration to retry a state lock.
 
   -no-color           If specified, output won't contain any color.
 

@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 func Provisioner() terraform.ResourceProvisioner {
 	return &schema.Provisioner{
 		Schema: map[string]*schema.Schema{
-			"inline": &schema.Schema{
+			"inline": {
 				Type:          schema.TypeList,
 				Elem:          &schema.Schema{Type: schema.TypeString},
 				PromoteSingle: true,
@@ -29,13 +30,13 @@ func Provisioner() terraform.ResourceProvisioner {
 				ConflictsWith: []string{"script", "scripts"},
 			},
 
-			"script": &schema.Schema{
+			"script": {
 				Type:          schema.TypeString,
 				Optional:      true,
 				ConflictsWith: []string{"inline", "scripts"},
 			},
 
-			"scripts": &schema.Schema{
+			"scripts": {
 				Type:          schema.TypeList,
 				Elem:          &schema.Schema{Type: schema.TypeString},
 				Optional:      true,
@@ -78,11 +79,17 @@ func applyFn(ctx context.Context) error {
 
 // generateScripts takes the configuration and creates a script from each inline config
 func generateScripts(d *schema.ResourceData) ([]string, error) {
-	var scripts []string
+	var lines []string
 	for _, l := range d.Get("inline").([]interface{}) {
-		scripts = append(scripts, l.(string))
+		line, ok := l.(string)
+		if !ok {
+			return nil, fmt.Errorf("Error parsing %v as a string", l)
+		}
+		lines = append(lines, line)
 	}
-	return scripts, nil
+	lines = append(lines, "")
+
+	return []string{strings.Join(lines, "\n")}, nil
 }
 
 // collectScripts is used to collect all the scripts we need
@@ -106,12 +113,20 @@ func collectScripts(d *schema.ResourceData) ([]io.ReadCloser, error) {
 	// Collect scripts
 	var scripts []string
 	if script, ok := d.GetOk("script"); ok {
-		scripts = append(scripts, script.(string))
+		scr, ok := script.(string)
+		if !ok {
+			return nil, fmt.Errorf("Error parsing script %v as string", script)
+		}
+		scripts = append(scripts, scr)
 	}
 
 	if scriptList, ok := d.GetOk("scripts"); ok {
 		for _, script := range scriptList.([]interface{}) {
-			scripts = append(scripts, script.(string))
+			scr, ok := script.(string)
+			if !ok {
+				return nil, fmt.Errorf("Error parsing script %v as string", script)
+			}
+			scripts = append(scripts, scr)
 		}
 	}
 
@@ -231,10 +246,16 @@ func copyOutput(
 }
 
 // retryFunc is used to retry a function for a given duration
+// TODO: this should probably backoff too
 func retryFunc(ctx context.Context, timeout time.Duration, f func() error) error {
 	// Build a new context with the timeout
 	ctx, done := context.WithTimeout(ctx, timeout)
 	defer done()
+
+	// container for atomic error value
+	type errWrap struct {
+		E error
+	}
 
 	// Try the function in a goroutine
 	var errVal atomic.Value
@@ -252,19 +273,20 @@ func retryFunc(ctx context.Context, timeout time.Duration, f func() error) error
 
 			// Try the function call
 			err := f()
+			errVal.Store(&errWrap{err})
+
 			if err == nil {
 				return
 			}
 
 			log.Printf("Retryable error: %v", err)
-			errVal.Store(err)
 		}
 	}()
 
 	// Wait for completion
 	select {
-	case <-doneCh:
 	case <-ctx.Done():
+	case <-doneCh:
 	}
 
 	// Check if we have a context error to check if we're interrupted or timeout
@@ -276,8 +298,8 @@ func retryFunc(ctx context.Context, timeout time.Duration, f func() error) error
 	}
 
 	// Check if we got an error executing
-	if err, ok := errVal.Load().(error); ok {
-		return err
+	if ev, ok := errVal.Load().(errWrap); ok {
+		return ev.E
 	}
 
 	return nil

@@ -4,14 +4,18 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
+	"strings"
 	"testing"
 
 	atlas "github.com/hashicorp/atlas-go/v1"
+	"github.com/hashicorp/terraform/helper/copy"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
 )
@@ -38,8 +42,8 @@ func TestPush_good(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -73,6 +77,73 @@ func TestPush_good(t *testing.T) {
 	}
 }
 
+func TestPush_goodBackendInit(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("push-backend-new"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	// init backend
+	ui := new(cli.MockUi)
+	ci := &InitCommand{
+		Meta: Meta{
+			Ui: ui,
+		},
+	}
+	if code := ci.Run(nil); code != 0 {
+		t.Fatalf("bad: %d\n%s", code, ui.ErrorWriter)
+	}
+
+	// Path where the archive will be "uploaded" to
+	archivePath := testTempFile(t)
+	defer os.Remove(archivePath)
+
+	client := &mockPushClient{File: archivePath}
+	ui = new(cli.MockUi)
+	c := &PushCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
+		},
+
+		client: client,
+	}
+
+	args := []string{
+		"-vcs=false",
+		td,
+	}
+	if code := c.Run(args); code != 0 {
+		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+	}
+
+	actual := testArchiveStr(t, archivePath)
+	expected := []string{
+		// Expected weird behavior, doesn't affect unpackaging
+		".terraform/",
+		".terraform/",
+		".terraform/plugins/",
+		fmt.Sprintf(".terraform/plugins/%s_%s/", runtime.GOOS, runtime.GOARCH),
+		fmt.Sprintf(".terraform/plugins/%s_%s/lock.json", runtime.GOOS, runtime.GOARCH),
+		".terraform/terraform.tfstate",
+		".terraform/terraform.tfstate",
+		"main.tf",
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("bad: %#v", actual)
+	}
+
+	variables := make(map[string]interface{})
+	if !reflect.DeepEqual(client.UpsertOptions.Variables, variables) {
+		t.Fatalf("bad: %#v", client.UpsertOptions)
+	}
+
+	if client.UpsertOptions.Name != "hello" {
+		t.Fatalf("bad: %#v", client.UpsertOptions)
+	}
+}
+
 func TestPush_noUploadModules(t *testing.T) {
 	// Path where the archive will be "uploaded" to
 	archivePath := testTempFile(t)
@@ -82,8 +153,8 @@ func TestPush_noUploadModules(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -102,8 +173,8 @@ func TestPush_noUploadModules(t *testing.T) {
 		ui := new(cli.MockUi)
 		c := &GetCommand{
 			Meta: Meta{
-				ContextOpts: testCtxConfig(testProvider()),
-				Ui:          ui,
+				testingOverrides: metaOverridesForProvider(testProvider()),
+				Ui:               ui,
 			},
 		}
 
@@ -172,8 +243,8 @@ func TestPush_input(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -231,8 +302,8 @@ func TestPush_inputPartial(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -301,8 +372,8 @@ func TestPush_localOverride(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -380,8 +451,8 @@ func TestPush_remoteOverride(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -471,8 +542,8 @@ func TestPush_preferAtlas(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -547,8 +618,8 @@ func TestPush_tfvars(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -622,8 +693,8 @@ func TestPush_name(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 
 		client: client,
@@ -650,8 +721,8 @@ func TestPush_noState(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -662,6 +733,12 @@ func TestPush_noState(t *testing.T) {
 }
 
 func TestPush_noRemoteState(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("push-no-remote"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
 	state := &terraform.State{
 		Modules: []*terraform.ModuleState{
 			&terraform.ModuleState{
@@ -679,18 +756,31 @@ func TestPush_noRemoteState(t *testing.T) {
 	}
 	statePath := testStateFile(t, state)
 
+	// Path where the archive will be "uploaded" to
+	archivePath := testTempFile(t)
+	defer os.Remove(archivePath)
+
+	client := &mockPushClient{File: archivePath}
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
 			Ui: ui,
 		},
+		client: client,
 	}
 
 	args := []string{
+		"-vcs=false",
 		"-state", statePath,
+		td,
 	}
 	if code := c.Run(args); code != 1 {
 		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+	}
+
+	errStr := ui.ErrorWriter.String()
+	if !strings.Contains(errStr, "remote backend") {
+		t.Fatalf("bad: %s", errStr)
 	}
 }
 
@@ -716,8 +806,8 @@ func TestPush_plan(t *testing.T) {
 	ui := new(cli.MockUi)
 	c := &PushCommand{
 		Meta: Meta{
-			ContextOpts: testCtxConfig(testProvider()),
-			Ui:          ui,
+			testingOverrides: metaOverridesForProvider(testProvider()),
+			Ui:               ui,
 		},
 	}
 
@@ -761,11 +851,12 @@ func testArchiveStr(t *testing.T, path string) []string {
 	return result
 }
 
+// we always quote map keys to be safe
 func pushTFVars() []atlas.TFVar {
 	return []atlas.TFVar{
 		{Key: "bar", Value: "foo", IsHCL: false},
 		{Key: "baz", Value: `{
-  A = "a"
+  "A" = "a"
 }`, IsHCL: true},
 		{Key: "fob", Value: `["a", "quotes \"in\" quotes"]`, IsHCL: true},
 		{Key: "foo", Value: "bar", IsHCL: false},

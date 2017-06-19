@@ -67,13 +67,18 @@ func TestAzureClientLease(t *testing.T) {
 	}
 	azureClient := client.(*AzureClient)
 
+	containerReference := azureClient.blobClient.GetContainerReference(azureClient.containerName)
+	blobReference := containerReference.GetBlobReference(azureClient.keyName)
+
 	// put empty blob so we can acquire lease against it
-	err = azureClient.blobClient.CreateBlockBlob(azureClient.containerName, azureClient.keyName)
+	options := &mainStorage.PutBlobOptions{}
+	err = blobReference.CreateBlockBlob(options)
 	if err != nil {
 		t.Fatalf("Error creating blob for leasing: %v", err)
 	}
 
-	_, err = azureClient.blobClient.AcquireLease(azureClient.containerName, azureClient.keyName, -1, leaseID)
+	leaseOptions := &mainStorage.LeaseOptions{}
+	_, err = blobReference.AcquireLease(-1, leaseID, leaseOptions)
 	if err != nil {
 		t.Fatalf("Error acquiring lease: %v", err)
 	}
@@ -88,6 +93,7 @@ func getAzureConfig(t *testing.T) map[string]string {
 		"arm_client_id":       os.Getenv("ARM_CLIENT_ID"),
 		"arm_client_secret":   os.Getenv("ARM_CLIENT_SECRET"),
 		"arm_tenant_id":       os.Getenv("ARM_TENANT_ID"),
+		"environment":         os.Getenv("ARM_ENVIRONMENT"),
 	}
 
 	for k, v := range config {
@@ -107,7 +113,11 @@ func getAzureConfig(t *testing.T) map[string]string {
 }
 
 func setup(t *testing.T, conf map[string]string) {
-	creds, err := getCredentialsFromConf(conf)
+	env, err := getAzureEnvironmentFromConf(conf)
+	if err != nil {
+		t.Fatalf("Error getting Azure environment from conf: %v", err)
+	}
+	creds, err := getCredentialsFromConf(conf, env)
 	if err != nil {
 		t.Fatalf("Error getting credentials from conf: %v", err)
 	}
@@ -147,23 +157,33 @@ func setup(t *testing.T, conf map[string]string) {
 	}
 
 	// Create container
-	accessKey, err := getStorageAccountAccessKey(conf, conf["resource_group_name"], conf["storage_account_name"])
+	accessKey, err := getStorageAccountAccessKey(conf, conf["resource_group_name"], conf["storage_account_name"], env)
 	if err != nil {
 		t.Fatalf("Error creating a storage account: %v", err)
 	}
-	storageClient, err := mainStorage.NewBasicClient(conf["storage_account_name"], accessKey)
+	storageClient, err := mainStorage.NewClient(conf["storage_account_name"], accessKey, env.StorageEndpointSuffix,
+		mainStorage.DefaultAPIVersion, true)
 	if err != nil {
 		t.Fatalf("Error creating storage client for storage account %q: %s", conf["storage_account_name"], err)
 	}
 	blobClient := storageClient.GetBlobService()
-	_, err = blobClient.CreateContainerIfNotExists(conf["container_name"], mainStorage.ContainerAccessTypePrivate)
+	containerName := conf["container_name"]
+	containerReference := blobClient.GetContainerReference(containerName)
+	options := &mainStorage.CreateContainerOptions{
+		Access: mainStorage.ContainerAccessTypePrivate,
+	}
+	_, err = containerReference.CreateIfNotExists(options)
 	if err != nil {
 		t.Fatalf("Couldn't create container with name %s: %s.", conf["container_name"], err)
 	}
 }
 
 func teardown(t *testing.T, conf map[string]string) {
-	creds, err := getCredentialsFromConf(conf)
+	env, err := getAzureEnvironmentFromConf(conf)
+	if err != nil {
+		t.Fatalf("Error getting Azure environment from conf: %v", err)
+	}
+	creds, err := getCredentialsFromConf(conf, env)
 	if err != nil {
 		t.Fatalf("Error getting credentials from conf: %v", err)
 	}

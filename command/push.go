@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/atlas-go/archive"
 	"github.com/hashicorp/atlas-go/v1"
 	"github.com/hashicorp/terraform/backend"
+	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/terraform"
 )
 
@@ -50,8 +51,8 @@ func (c *PushCommand) Run(args []string) int {
 
 	// This is a map of variables specifically from the CLI that we want to overwrite.
 	// We need this because there is a chance that the user is trying to modify
-	// a variable we don't see in our context, but which exists in this atlas
-	// environment.
+	// a variable we don't see in our context, but which exists in this Terraform
+	// Enterprise workspace.
 	cliVars := make(map[string]string)
 	for k, v := range c.variables {
 		if _, ok := overwriteMap[k]; ok {
@@ -70,24 +71,6 @@ func (c *PushCommand) Run(args []string) int {
 		c.Ui.Error(err.Error())
 		return 1
 	}
-
-	/*
-		// Verify the state is remote, we can't push without a remote state
-		s, err := c.State()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Failed to read state: %s", err))
-			return 1
-		}
-		if !s.State().IsRemote() {
-			c.Ui.Error(
-				"Remote state is not enabled. For Atlas to run Terraform\n" +
-					"for you, remote state must be used and configured. Remote\n" +
-					"state via any backend is accepted, not just Atlas. To\n" +
-					"configure remote state, use the `terraform remote config`\n" +
-					"command.")
-			return 1
-		}
-	*/
 
 	// Check if the path is a plan
 	plan, err := c.Plan(configPath)
@@ -116,12 +99,28 @@ func (c *PushCommand) Run(args []string) int {
 		return 1
 	}
 
+	var conf *config.Config
+	if mod != nil {
+		conf = mod.Config()
+	}
+
 	// Load the backend
 	b, err := c.Backend(&BackendOpts{
-		ConfigPath: configPath,
+		Config: conf,
 	})
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load backend: %s", err))
+		return 1
+	}
+
+	// We require a non-local backend
+	if c.IsLocalBackend(b) {
+		c.Ui.Error(
+			"A remote backend is not enabled. For Atlas to run Terraform\n" +
+				"for you, remote state must be used and configured. Remote \n" +
+				"state via any backend is accepted, not just Atlas. To configure\n" +
+				"a backend, please see the documentation at the URL below:\n\n" +
+				"https://www.terraform.io/docs/state/remote.html")
 		return 1
 	}
 

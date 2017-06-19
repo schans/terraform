@@ -151,7 +151,7 @@ func testContext2(t *testing.T, opts *ContextOpts) *Context {
 
 	ctx, err := NewContext(opts)
 	if err != nil {
-		t.Fatalf("err: %s", err)
+		t.Fatalf("failed to create test context\n\n%s\n", err)
 	}
 
 	return ctx
@@ -262,6 +262,11 @@ func testDiffFn(
 			if _, ok := c.Raw["__"+k+"_requires_new"]; ok {
 				attrDiff.RequiresNew = true
 			}
+
+			if attr, ok := s.Attributes[k]; ok {
+				attrDiff.Old = attr
+			}
+
 			diff.Attributes[k] = attrDiff
 		}
 	}

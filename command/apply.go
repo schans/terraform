@@ -47,6 +47,8 @@ func (c *ApplyCommand) Run(args []string) int {
 	cmdFlags.StringVar(&c.Meta.statePath, "state", "", "path")
 	cmdFlags.StringVar(&c.Meta.stateOutPath, "state-out", "", "path")
 	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
+	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
+	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -60,6 +62,12 @@ func (c *ApplyCommand) Run(args []string) int {
 	configPath, err := ModulePath(args)
 	if err != nil {
 		c.Ui.Error(err.Error())
+		return 1
+	}
+
+	// Check for user-supplied plugin path
+	if c.pluginPath, err = c.loadPluginPath(); err != nil {
+		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
 		return 1
 	}
 
@@ -130,10 +138,15 @@ func (c *ApplyCommand) Run(args []string) int {
 		}
 	*/
 
+	var conf *config.Config
+	if mod != nil {
+		conf = mod.Config()
+	}
+
 	// Load the backend
 	b, err := c.Backend(&BackendOpts{
-		ConfigPath: configPath,
-		Plan:       plan,
+		Config: conf,
+		Plan:   plan,
 	})
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load backend: %s", err))
@@ -199,7 +212,7 @@ func (c *ApplyCommand) Run(args []string) int {
 		ctxCancel()
 
 		// Notify the user
-		c.Ui.Output("Interrupt received. Gracefully shutting down...")
+		c.Ui.Output(outputInterrupt)
 
 		// Still get the result, since there is still one
 		select {
@@ -272,11 +285,15 @@ Options:
                          modifying. Defaults to the "-state-out" path with
                          ".backup" extension. Set to "-" to disable backup.
 
+  -lock=true             Lock the state file when locking is supported.
+
+  -lock-timeout=0s       Duration to retry a state lock.
+
   -input=true            Ask for input for variables if not directly set.
 
   -no-color              If specified, output won't contain any color.
 
-  -parallelism=n         Limit the number of concurrent operations.
+  -parallelism=n         Limit the number of parallel resource operations.
                          Defaults to 10.
 
   -refresh=true          Update state prior to checking for differences. This
@@ -318,6 +335,10 @@ Options:
                          ".backup" extension. Set to "-" to disable backup.
 
   -force                 Don't ask for input for destroy confirmation.
+
+  -lock=true             Lock the state file when locking is supported.
+
+  -lock-timeout=0s       Duration to retry a state lock.
 
   -no-color              If specified, output won't contain any color.
 
@@ -408,3 +429,7 @@ func outputsAsString(state *terraform.State, modPath []string, schema []*config.
 
 	return strings.TrimSpace(outputBuf.String())
 }
+
+const outputInterrupt = `Interrupt received.
+Please wait for Terraform to exit or data loss may occur.
+Gracefully shutting down...`

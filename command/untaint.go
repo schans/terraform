@@ -1,9 +1,13 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
+
+	"github.com/hashicorp/terraform/command/clistate"
+	"github.com/hashicorp/terraform/state"
 )
 
 // UntaintCommand is a cli.Command implementation that manually untaints
@@ -23,6 +27,8 @@ func (c *UntaintCommand) Run(args []string) int {
 	cmdFlags.StringVar(&c.Meta.statePath, "state", DefaultStateFilename, "path")
 	cmdFlags.StringVar(&c.Meta.stateOutPath, "state-out", "", "path")
 	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
+	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
+	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -51,14 +57,34 @@ func (c *UntaintCommand) Run(args []string) int {
 	}
 
 	// Get the state
-	state, err := b.State()
+	env := c.Workspace()
+	st, err := b.State(env)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load state: %s", err))
 		return 1
 	}
+	if err := st.RefreshState(); err != nil {
+		c.Ui.Error(fmt.Sprintf("Failed to load state: %s", err))
+		return 1
+	}
+
+	if c.stateLock {
+		lockCtx, cancel := context.WithTimeout(context.Background(), c.stateLockTimeout)
+		defer cancel()
+
+		lockInfo := state.NewLockInfo()
+		lockInfo.Operation = "untaint"
+		lockID, err := clistate.Lock(lockCtx, st, lockInfo, c.Ui, c.Colorize())
+		if err != nil {
+			c.Ui.Error(fmt.Sprintf("Error locking state: %s", err))
+			return 1
+		}
+
+		defer clistate.Unlock(st, lockID, c.Ui, c.Colorize())
+	}
 
 	// Get the actual state structure
-	s := state.State()
+	s := st.State()
 	if s.Empty() {
 		if allowMissing {
 			return c.allowMissingExit(name, module)
@@ -116,11 +142,11 @@ func (c *UntaintCommand) Run(args []string) int {
 	rs.Untaint()
 
 	log.Printf("[INFO] Writing state output to: %s", c.Meta.StateOutPath())
-	if err := state.WriteState(s); err != nil {
+	if err := st.WriteState(s); err != nil {
 		c.Ui.Error(fmt.Sprintf("Error writing state file: %s", err))
 		return 1
 	}
-	if err := state.PersistState(); err != nil {
+	if err := st.PersistState(); err != nil {
 		c.Ui.Error(fmt.Sprintf("Error writing state file: %s", err))
 		return 1
 	}
@@ -152,6 +178,10 @@ Options:
   -backup=path        Path to backup the existing state file before
                       modifying. Defaults to the "-state-out" path with
                       ".backup" extension. Set to "-" to disable backup.
+
+  -lock=true          Lock the state file when locking is supported.
+
+  -lock-timeout=0s    Duration to retry a state lock.
 
   -module=path        The module path where the resource lives. By
                       default this will be root. Child modules can be specified
